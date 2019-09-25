@@ -1,6 +1,8 @@
+from typing import Dict
+
 import networkx as nx
 
-import dfa
+from dfa import DeterministicFiniteAutomaton
 import fa
 
 
@@ -11,11 +13,11 @@ class NonDeterministicFiniteAutomaton(fa.FiniteAutomaton):
         self.end = None
         self.nextid = 0
 
-    def add_node(self, final: bool = False):
+    def add_node(self, token: str = None):
         curr_id = self.nextid
         self.nextid += 1
 
-        self.graph.add_node(curr_id, final=final)
+        self.graph.add_node(curr_id, token=token)
 
         if self.begin is None:
             self.begin = curr_id
@@ -25,19 +27,16 @@ class NonDeterministicFiniteAutomaton(fa.FiniteAutomaton):
 
     def add_nodes(self, ids):
         for x in ids:
-            self.graph.add_node(x, final=False)
+            self.graph.add_node(x, token=None)
 
     def add_edge(self, from_node, to_node, char):
         self.graph.add_edge(from_node, to_node, char=("" if char is None else char))
 
-    def alphabet(self):
-        return set(char for (f, t, char) in self.graph.edges(data="char") if char is not "")
-
     def add_nfa(self, nfa: 'NonDeterministicFiniteAutomaton'):
         our_start = self.nextid
 
-        for (node, final) in nfa.graph.nodes(data="final", default=False):
-            self.add_node(final)
+        for (node, token) in nfa.graph.nodes(data="token", default=False):
+            self.add_node(token)
 
         for (from_node, to_node, char) in nfa.graph.edges(data="char"):
             self.add_edge(our_start + from_node, our_start + to_node, char)
@@ -56,11 +55,11 @@ class NonDeterministicFiniteAutomaton(fa.FiniteAutomaton):
 
         graph = self.graph.copy()
 
-        nodes = list(graph.nodes(data="final"))
+        nodes = list(graph.nodes(data="token"))
         removed_nodes = []
 
         # Linear optimization pass
-        for (index, (node, final)) in enumerate(nodes):
+        for (index, (node, token)) in enumerate(nodes):
             if node in removed_nodes:
                 continue
 
@@ -69,21 +68,31 @@ class NonDeterministicFiniteAutomaton(fa.FiniteAutomaton):
             if len(out_edges) == 1:
                 (_node, next_node, next_char) = out_edges[0]
                 if next_char == "" and len(graph.in_edges(next_node)) == 1:
+                    # Found a 0-pass arc,
+                    #  \       /
+                    # - O --- O -
+                    #  /       \
+                    # If the connection between the nodes is empty (has no chars) we can optimize it by
+                    # unifying the nodes
                     graph.remove_edge(node, next_node)
                     for (_node, next_next, next_char) in graph.out_edges(next_node, data="char"):
                         graph.add_edge(node, next_next, char=next_char)
+
+                    if _node["token"] is not None:
+                        if token is not None:
+                            raise Exception('Multiple tokens with same text!')
+                        node["token"] = _node["token"]
+
                     graph.remove_node(next_node)
                     removed_nodes.append(next_node)
-
-                    out_edges = list(graph.out_edges(node, data="char"))
 
         # Re-enumerate pass
 
         translation = {}
 
-        for (index, (node, final)) in enumerate(nodes):
+        for (index, (node, token)) in enumerate(nodes):
             if node not in removed_nodes:
-                new_x = res.add_node(final=final)
+                new_x = res.add_node(token=token)
                 translation[index] = new_x
 
         for (f, t, c) in graph.edges(data="char"):
@@ -92,7 +101,7 @@ class NonDeterministicFiniteAutomaton(fa.FiniteAutomaton):
         return res
 
     def to_dfa(self):
-        res = dfa.DeterministicFiniteAutomaton()
+        res = DeterministicFiniteAutomaton()
 
         def nochar_closure(nodes):
             """
@@ -133,13 +142,22 @@ class NonDeterministicFiniteAutomaton(fa.FiniteAutomaton):
 
             return frozenset(out_nodes)
 
+        def get_token(nodes):
+            tokens = set(filter(lambda x: x is not None, (self.graph.nodes[node]["token"] for node in nodes)))
+            if len(tokens) == 0:
+                return None
+            elif len(tokens) == 1:
+                return next(iter(tokens))
+            else:
+                raise Exception(f"Multiple tokens for the same text: '{','.join(tokens)}' ")
+
         alphabet = self.alphabet()
 
         start_nodes = nochar_closure(frozenset({self.begin}))
         out_nodes = {start_nodes: 0}
         work_list = [start_nodes]
 
-        res.add_node(0)
+        res.add_node(0, token=get_token(start_nodes))
         next_id = 1
 
         while work_list:
@@ -152,7 +170,7 @@ class NonDeterministicFiniteAutomaton(fa.FiniteAutomaton):
 
                 if t not in out_nodes:
                     out_nodes[t] = next_id
-                    res.add_node(next_id)
+                    res.add_node(next_id, get_token(t))
                     next_id += 1
                     work_list.append(t)
 
@@ -161,17 +179,17 @@ class NonDeterministicFiniteAutomaton(fa.FiniteAutomaton):
                 #print(f"  {out_nodes[current]} + {char} = {out_nodes[t]}")
         return res
 
-
-
-    @staticmethod
-    def from_text(text: str):
-        nfa = NonDeterministicFiniteAutomaton()
+    @classmethod
+    def from_text(cls, text: str, token: str):
+        nfa = cls()
         last = nfa.add_node()
 
         for char in text:
             next = nfa.add_node()
             nfa.add_edge(last, next, char)
             last = next
+
+        nfa.graph.nodes[last]['token'] = token
 
         return nfa
 
@@ -193,7 +211,7 @@ class Regex:
         return res
 
     @staticmethod
-    def or_catenate(nfa1, nfa2):
+    def or_catenate_old(nfa1, nfa2):
         #       -> nfa1 |
         # first |       -> last
         #       -> nfa2 |
@@ -212,6 +230,23 @@ class Regex:
         return res
 
     @staticmethod
+    def or_catenate(*nfas):
+        #       -> nfa1 |
+        # first |       -> last
+        #       -> nfa2 |
+        res = NonDeterministicFiniteAutomaton()
+
+        first = res.add_node()
+        start = [res.add_nfa(nfa) for nfa in nfas]
+        last = res.add_node()
+
+        for x in range(len(nfas)):
+            res.add_edge(first, start[x] + nfas[x].begin, None)
+            res.add_edge(start[x] + nfas[x].end, last, None)
+
+        return res
+
+    @staticmethod
     def star_repeat(nfa):
         res = NonDeterministicFiniteAutomaton()
         res.add_nfa(nfa)
@@ -223,9 +258,10 @@ class Regex:
         return Regex.concatenate([nfa] * times)
 
     @staticmethod
-    def parse_group(text: str):
+    def parse_group(text: str, token):
         nfa = None  # type: NonDeterministicFiniteAutomaton
         last_nfa = None
+        next_token = 0
 
         def flush_last():
             nonlocal nfa, last_nfa
@@ -236,6 +272,35 @@ class Regex:
                 nfa = Regex.concatenate((nfa, last_nfa))
 
             last_nfa = None
+
+        def allocate_token():
+            nonlocal next_token
+            tk = next_token
+            next_token += 1
+            return tk
+
+        def transform_tokens():
+            """
+            The parsing method colors each generated nfa with a sequential token id, when the group parsing is done
+            every token is removed expect from the last one that is replaced with the real token, this function does
+            exactly that, iterating every node and trasforming its token
+            """
+
+            target_token = next_token - 1
+
+            # If the last character is a star there isn't just one target token
+            # But two because two nfas could be correct (the starred element and
+            # the one before him)
+            if len(text) > 0 and text[-1] == '*':
+                target_token -= 1
+
+            replaced_token = token
+            for (node, ntoken) in nfa.graph.nodes(data="token"):
+                if ntoken is None: continue
+                if ntoken < target_token:
+                    nfa.graph.nodes[node]["token"] = None
+                else:
+                    nfa.graph.nodes[node]["token"] = replaced_token
 
         # print(f"START GROUP '{text}'")
 
@@ -249,9 +314,10 @@ class Regex:
 
                 group_end = text.index(")", i + 1)
                 subtext = text[i + 1: group_end]
-                last_nfa = Regex.parse_group(subtext)
+                last_nfa = Regex.parse_group(subtext, allocate_token())
                 i = group_end
-            elif char == "*":
+            elif char == "*" or char == '+':
+                # + and * only differ in the token assignment
                 assert last_nfa is not None
                 last_nfa = Regex.star_repeat(last_nfa)
                 flush_last()
@@ -265,31 +331,54 @@ class Regex:
                 last_nfa = Regex.for_repeat(last_nfa, number)
             elif char == "|":
                 flush_last()
-                next_nfa = Regex.parse_group(text[i + 1:])
+                transform_tokens()
+                next_nfa = Regex.parse_group(text[i + 1:], token)
                 nfa = Regex.or_catenate(nfa, next_nfa)
-                break
+                return nfa
             else:  # Text
                 flush_last()
-                last_nfa = NonDeterministicFiniteAutomaton.from_text(char)
+                last_nfa = NonDeterministicFiniteAutomaton.from_text(char, allocate_token())
 
             i += 1
 
         # print(f"DONE GROUP {text}")
 
         flush_last()
+        transform_tokens()
         return nfa
 
     @staticmethod
-    def regex_to_nfa(text: str):
-        return Regex.parse_group(text)
+    def regex_to_nfa(text: str, token):
+        return Regex.parse_group(text, token)
+
+    @staticmethod
+    def regex_map_to_nfa(remap: Dict[str, str]):
+        return Regex.or_catenate(*[Regex.regex_to_nfa(b, a) for (a, b) in remap.items()])
 
 
 if __name__ == '__main__':
-    nfa = Regex.regex_to_nfa("a(b|c)*")
-    nfa = nfa.simplify()
+    nfa = Regex.regex_to_nfa("ad(b|c)*", "E")
+    # nfa = nfa.simplify()
+    # nfa.visualize()
+    dfa = nfa.to_dfa()
+    # dfa.visualize()  # Does not work well, self-edges missing and some edges end up overlapping
+    print(dfa.run("adba"))
+    print(dfa.run("adbcbcbc"))
+    print(dfa.run("a"))
+    print(dfa.run("ad"))
+    print(dfa.run("adbcbcbca"))
+
+    print('---------- TEST 2 ----------')
+
+    nfa = Regex.regex_map_to_nfa({
+        'SPACE': ' +',
+        'NOT': 'not',
+        'NOR': 'nor',
+        'AND': 'and',
+        'BINARY_NUMBER': 'b(0|1)+'
+    })
     nfa.visualize()
     dfa = nfa.to_dfa()
-    dfa.visualize()  # Does not work well, self-edges missing and some edges end up overlapping
-    print(dfa.run("aba"))
-    print(dfa.run("abcbcbc"))
-    print(dfa.run("abcbcbca"))
+    dfa.visualize()
+    print(list(dfa.tokenize('not  b0 nor b1 and')))
+
