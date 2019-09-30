@@ -2,8 +2,7 @@ from typing import Dict
 
 import networkx as nx
 
-from dfa import DeterministicFiniteAutomaton
-import fa
+from . import dfa, fa
 
 
 class NonDeterministicFiniteAutomaton(fa.FiniteAutomaton):
@@ -78,6 +77,7 @@ class NonDeterministicFiniteAutomaton(fa.FiniteAutomaton):
                     for (_node, next_next, next_char) in graph.out_edges(next_node, data="char"):
                         graph.add_edge(node, next_next, char=next_char)
 
+                    _node = self.graph.nodes[_node]
                     if _node["token"] is not None:
                         if token is not None:
                             raise Exception('Multiple tokens with same text!')
@@ -101,7 +101,7 @@ class NonDeterministicFiniteAutomaton(fa.FiniteAutomaton):
         return res
 
     def to_dfa(self):
-        res = DeterministicFiniteAutomaton()
+        res = dfa.DeterministicFiniteAutomaton()
 
         def nochar_closure(nodes):
             """
@@ -230,7 +230,7 @@ class Regex:
         return res
 
     @staticmethod
-    def or_catenate(*nfas):
+    def or_catenate(*nfas, combine_end=True):
         #       -> nfa1 |
         # first |       -> last
         #       -> nfa2 |
@@ -238,11 +238,13 @@ class Regex:
 
         first = res.add_node()
         start = [res.add_nfa(nfa) for nfa in nfas]
-        last = res.add_node()
+        if combine_end:
+            last = res.add_node()
 
         for x in range(len(nfas)):
             res.add_edge(first, start[x] + nfas[x].begin, None)
-            res.add_edge(start[x] + nfas[x].end, last, None)
+            if combine_end:
+                res.add_edge(start[x] + nfas[x].end, last, None)
 
         return res
 
@@ -295,6 +297,7 @@ class Regex:
                 target_token -= 1
 
             replaced_token = token
+            # print(f'Replaceing tokens greater than {target_token} with {replaced_token}')
             for (node, ntoken) in nfa.graph.nodes(data="token"):
                 if ntoken is None: continue
                 if ntoken < target_token:
@@ -315,6 +318,14 @@ class Regex:
                 group_end = text.index(")", i + 1)
                 subtext = text[i + 1: group_end]
                 last_nfa = Regex.parse_group(subtext, allocate_token())
+                i = group_end
+            elif char == '[':
+                flush_last()
+
+                group_end = text.index("]", i + 1)
+                subtext = text[i + 1: group_end]
+                t = allocate_token()
+                last_nfa = Regex.or_catenate(*[NonDeterministicFiniteAutomaton.from_text(c, t) for c in subtext])
                 i = group_end
             elif char == "*" or char == '+':
                 # + and * only differ in the token assignment
@@ -353,32 +364,33 @@ class Regex:
 
     @staticmethod
     def regex_map_to_nfa(remap: Dict[str, str]):
-        return Regex.or_catenate(*[Regex.regex_to_nfa(b, a) for (a, b) in remap.items()])
+        return Regex.or_catenate(*[Regex.regex_to_nfa(b, a) for (a, b) in remap.items()], combine_end=False)
 
 
-if __name__ == '__main__':
+def main():
     nfa = Regex.regex_to_nfa("ad(b|c)*", "E")
     # nfa = nfa.simplify()
     # nfa.visualize()
-    dfa = nfa.to_dfa()
+    x = nfa.to_dfa()
     # dfa.visualize()  # Does not work well, self-edges missing and some edges end up overlapping
-    print(dfa.run("adba"))
-    print(dfa.run("adbcbcbc"))
-    print(dfa.run("a"))
-    print(dfa.run("ad"))
-    print(dfa.run("adbcbcbca"))
+    print(x.run("adba"))
+    print(x.run("adbcbcbc"))
+    print(x.run("a"))
+    print(x.run("ad"))
+    print(x.run("adbcbcbca"))
 
     print('---------- TEST 2 ----------')
 
     nfa = Regex.regex_map_to_nfa({
-        'SPACE': ' +',
+        'SPACE': "[ \t\n]+",
         'NOT': 'not',
         'NOR': 'nor',
         'AND': 'and',
-        'BINARY_NUMBER': 'b(0|1)+'
+        'BINARY_NUMBER': '[0123456789]+'
     })
     nfa.visualize()
-    dfa = nfa.to_dfa()
+    dfa = nfa.to_dfa().minimize()
     dfa.visualize()
-    print(list(dfa.tokenize('not  b0 nor b1 and')))
+    dfa.export('fuck')
+    print(list(dfa.tokenize("not  \n0 nor 15 and")))
 

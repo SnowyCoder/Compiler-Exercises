@@ -1,10 +1,8 @@
-import time
 from collections import defaultdict
 from typing import Set
 
 import networkx as nx
-import fa
-import nfa
+from . import fa, nfa
 
 
 class DeterministicFiniteAutomaton(fa.FiniteAutomaton):
@@ -46,13 +44,15 @@ class DeterministicFiniteAutomaton(fa.FiniteAutomaton):
             splitted = defaultdict(list)
 
             for node in part:
+                partitions = set()
+
                 for _, out_node, char in self.graph.out_edges(node, data="char"):
-                    if out_node in part:
-                        # No need to split
-                        splitted[0].append(node)
-                    else:
+                    if out_node not in part:
                         out_part = node_to_partition[out_node]
-                        splitted[(out_part, char)].append(node)
+                        partitions.add((char, out_part))
+
+                # print(f"{node} in {partitions}")
+                splitted[(frozenset(partitions))].append(node)
 
             return list(frozenset(x) for x in splitted.values())
 
@@ -71,8 +71,8 @@ class DeterministicFiniteAutomaton(fa.FiniteAutomaton):
 
             for part in partition:
                 splitted = update_ntp(split(part))
+                # print(f'Splitting {part} in {splitted}')
                 todo_partition += splitted
-
 
         res = DeterministicFiniteAutomaton()
 
@@ -88,8 +88,6 @@ class DeterministicFiniteAutomaton(fa.FiniteAutomaton):
         for index, part in enumerate(partition):
             for node in part:
                 for _, out_node, char in self.graph.out_edges(node, data="char"):
-                    if out_node in part:
-                        continue
                     res.add_edge(index, node_to_partition[out_node], char, double_ok=True)
 
         return res
@@ -97,20 +95,31 @@ class DeterministicFiniteAutomaton(fa.FiniteAutomaton):
     def reverse(self) -> 'nfa.NonDeterministicFiniteAutomaton':
         rev = nfa.NonDeterministicFiniteAutomaton()
 
+        start_nodes = []
+
         for node, token in self.graph.nodes(data='token'):
             rev.add_node(token)
+            print(node, token, len(self.graph.out_edges(node)))
+            if token is not None:
+                start_nodes.append(node)
 
         for nfrom, nto, nchar in self.graph.edges(data='char'):
             rev.add_edge(nto, nfrom, nchar)
+
+        if len(start_nodes) > 1:
+            first_node = rev.add_node()
+
+            for n in start_nodes:
+                rev.add_edge(first_node, n, '')
 
         rev.begin, rev.end = rev.end, rev.begin
 
         return rev
 
-    def minimize_brzozowski(self):
-        return self.reverse().to_dfa().reverse().to_dfa()
+    # def minimize_brzozowski(self):
+    #    return self.reverse().to_dfa().reverse().to_dfa()
 
-    minimize = minimize_brzozowski
+    minimize = minimize_hopcroft
 
     def start(self, starting_node=0):
         return DFARunner(self.graph, starting_node)
@@ -138,26 +147,33 @@ class DeterministicFiniteAutomaton(fa.FiniteAutomaton):
                     runner.state = last_successful_state
                     index = last_successful_index
                     yield (runner.token, text[token_start_index:index + 1])
+                    last_successful_state = None
+                    last_successful_index = -1
                     token_start_index = index + 1
                     runner.reset()
+                    #print('backtrack')
                 else:
                     # We can't backtrack, report error
                     yield (None, text[token_start_index: index + 1])
                     # What is the back-on-track strategy? well I don't really know, none for now
                     token_start_index = index + 1
                     runner.reset()
+                    #print('error')
             else:
                 token = runner.token
                 if token is not None:
                     last_successful_state = runner.state
                     last_successful_index = index
+                    #print('Found!')
 
             # Advance
             index += 1
 
-        if runner.token is None:
+        if token_start_index != len(text) and runner.token is None:
             # No token recognized for final string
             yield (None, text[token_start_index:index])
+        elif runner.token:
+            yield (runner.token, text[token_start_index:index])
 
 
 class DFARunner:
