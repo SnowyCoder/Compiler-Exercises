@@ -1,3 +1,4 @@
+import copy
 from typing import List, Iterator, Tuple, Optional
 import networkx as nx
 
@@ -147,11 +148,61 @@ class Grammar:
         else:
             return None
 
+    def can_be_zero(self, focus):
+        if focus[0] != NONTERMINAL:
+            return False
+        return self.next(focus[1], None) == []
+
+    def resolve_all_left_recursion(self):
+        # Only direct for now
+        # TODO: create tree-rewrital after non-left-recursive grammar parsing (not implemented yet)
+        dictdef = copy.deepcopy(self.dictdef)  # type: dict
+
+        for name, rules in self.dictdef.items():
+            if any(rule[0][1] == name for rule in rules):
+                # Left recursion!
+                # First, discard A -> A
+                def_list = dictdef[name]  # type: List
+
+                pure_recursive_rule = [(NONTERMINAL, name)]
+
+                recursive_rules = [rule[1:] for rule in def_list if rule[0] == (NONTERMINAL, name) if rule != pure_recursive_rule]
+                non_recursive_rules = [rule for rule in def_list if rule[0] != (NONTERMINAL, name)]
+
+                tail_name = name + '_TAIL'
+
+                if tail_name in dictdef.keys():
+                    # TODO: generate iterative name generator
+                    raise Exception(f'Cannot generate non-left-recusrive tree: {tail_name} already occupied')
+
+                new_def_list = [x + [(NONTERMINAL, tail_name)] for x in non_recursive_rules]
+                tail_def_list = [x + [(NONTERMINAL, tail_name)] for x in recursive_rules] + [[]]
+
+                dictdef[name] = new_def_list
+                dictdef[tail_name] = tail_def_list
+
+        return Grammar(dictdef, self.root)
+
+    def __str__(self):
+        res = ''
+        for name, def_list in self.dictdef.items():
+            name_p = f"{name} ->"
+            res += name_p
+            for i, d in enumerate(def_list):
+                if i != 0:
+                    res += len(name_p) * ' ' + '|'
+
+                res += ' '
+                res += ' '.join(x[1] for x in d)
+                res += '\n'
+        return res
+
     @classmethod
     def parse_grammar(cls, text):
         token_stream = TokenStream(iter(GRAMMAR_SCANNER.tokenize(text)))
         grammar = dict()
         names = set()
+        first_name = None
 
         while True:
             tree = parse(GRAMMAR_GRAMMAR, token_stream)
@@ -167,6 +218,9 @@ class Grammar:
             if name in names:
                 raise Exception(f'Double definition of {name}')
 
+            if first_name is None:
+                first_name = name
+
             names.add(name)
             grammar[name] = definition
 
@@ -178,7 +232,7 @@ class Grammar:
             ] for name, def_list in grammar.items()
         }
 
-        return grammar2
+        return Grammar(grammar2, (NONTERMINAL, first_name))
 
     @classmethod
     def parse_grammar_definition_from_tree(cls, tree: SyntaxTree):
@@ -246,8 +300,13 @@ def parse(grammar: Grammar, tokens: TokenStream) -> Optional[SyntaxTree]:
             advance_token()
             consume_focus()
 
-            if current_token is None and focus is not None:
-                raise Exception(f'Token stream terminates too early')
+            if current_token is None:
+                while focus is not None:
+                    if grammar.can_be_zero(focus):
+                        consume_focus()
+                    else:
+                        raise Exception(f'Token stream terminates too early, expected {focus}')
+
         else:
             children = grammar.next(focus[1], current_token)
             if children is None:
@@ -258,6 +317,7 @@ def parse(grammar: Grammar, tokens: TokenStream) -> Optional[SyntaxTree]:
             node_stack += reversed(children_with_ids)
             consume_focus()
     return tree
+
 
 GRAMMAR_SCANNER = nfa.Regex.regex_map_to_nfa({
     'space': "[ \t]+",
@@ -290,7 +350,7 @@ GRAMMAR_GRAMMAR = Grammar({
 
 
 def main():
-    input_txt = """
+    input_grammar = """
     expr -> expr plus term
           | expr minus term
           | term 
@@ -301,6 +361,26 @@ def main():
             | number
     """
 
-    print(Grammar.parse_grammar(input_txt))
+    grammar = Grammar.parse_grammar(input_grammar)
+
+    input_scanner = nfa.Regex.regex_map_to_nfa({
+        'space': "[ \t]+",
+        'number': '[0123456789]+',
+        'plus': '[+]',
+        'minus': '-',
+        'mul': '[*]',
+        'div': '/',
+        'open_phar': '[(]',
+        'close_phar': ')',
+    }).to_dfa().minimize()
+
+    print(grammar)
+    print('---- LEFT REC RESOLVED ----')
+    grammar = grammar.resolve_all_left_recursion()
+    print(grammar)
+
+    token_stream = TokenStream(iter(input_scanner.tokenize('1+2*(3+4)')))
+    parse(grammar, token_stream).visualize()
+
 
 
