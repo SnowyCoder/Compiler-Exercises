@@ -33,7 +33,7 @@ class SyntaxTree:
     def __init__(self):
         self.nodes = []  # type: List[SyntaxTreeNode]
 
-    def add_node(self, node_type, parent: Optional[SyntaxTreeNode], text: str=None):
+    def add_node(self, node_type, parent: Optional[SyntaxTreeNode], text: str = None):
         node = SyntaxTreeNode(parent, node_type, text)
         self.nodes.append(node)
 
@@ -118,10 +118,16 @@ class TokenStream:
         self.end_reached = False
 
 
+TRANSFORM_LEFT_RECURSION = 0
+
+
 class Grammar:
-    def __init__(self, dictdef, root):
+    def __init__(self, dictdef, root, result_transform=None):
+        if result_transform is None:
+            result_transform = []
         self.root = root
         self.dictdef = dictdef
+        self.result_transofrm = result_transform
 
     def next(self, state, token):
         has_zero = False
@@ -158,6 +164,8 @@ class Grammar:
         # TODO: create tree-rewrital after non-left-recursive grammar parsing (not implemented yet)
         dictdef = copy.deepcopy(self.dictdef)  # type: dict
 
+        transformations = []
+
         for name, rules in self.dictdef.items():
             if any(rule[0][1] == name for rule in rules):
                 # Left recursion!
@@ -180,8 +188,9 @@ class Grammar:
 
                 dictdef[name] = new_def_list
                 dictdef[tail_name] = tail_def_list
+                transformations.append((TRANSFORM_LEFT_RECURSION, name))
 
-        return Grammar(dictdef, self.root)
+        return Grammar(dictdef, self.root, transformations)
 
     def __str__(self):
         res = ''
@@ -205,7 +214,7 @@ class Grammar:
         first_name = None
 
         while True:
-            tree = parse(GRAMMAR_GRAMMAR, token_stream)
+            tree = GRAMMAR_GRAMMAR.parse(token_stream)
             if tree is None:
                 break
 
@@ -259,64 +268,108 @@ class Grammar:
 
         return name, parse_def_list(def_list)
 
+    def apply_transformation(self, tree: SyntaxTree) -> SyntaxTree:
+        res = SyntaxTree()
 
-def parse(grammar: Grammar, tokens: TokenStream) -> Optional[SyntaxTree]:
-    tree = SyntaxTree()
+        left_transformed = frozenset([x[1] for x in self.result_transofrm if x[0] == TRANSFORM_LEFT_RECURSION])
 
-    root = grammar.root
-    focus = root
-    focus_node = tree.add_node(focus, None)
+        def run(input_node: SyntaxTreeNode, parent: Optional[SyntaxTreeNode]):
+            if input_node.ntype[0] != NONTERMINAL or (input_node.ntype[1] not in left_transformed):
+                output_node = res.add_node(input_node.ntype, parent, input_node.text)
+                for c in input_node.children:
+                    run(c, output_node)
+                return
 
-    node_stack = [(None, None)]  # Last element
+            # Let's rewrite
+            node_type_name = input_node.ntype[1]
+            tail_name = node_type_name + '_TAIL'
 
-    token_iter = tokens
+            # First: find the last nonempty tail
+            current_tail = input_node
+            while len(current_tail.children) > 0:
+                current_tail = current_tail.children[-1]
 
-    current_token, current_text = token_iter.peek()
+            last_tail = current_tail.parent
+            # Now we need to rotate this subtree using the last tail as the parent
+            # And assigning the previous parent as the first child (do this recursively)
 
-    def advance_token():
-        nonlocal current_token, current_text
-        token_iter.consume()
+            def rotate_tree(current_input_node, output_parent):
+                tail = current_input_node.ntype[1] == tail_name
+
+                current_out_node = res.add_node((NONTERMINAL, node_type_name), output_parent)
+
+                if tail:
+                    # Tails should add their parent as their first child (as they are rotated)
+                    rotate_tree(current_input_node.parent, current_out_node)
+
+                # Ignore last element (the tree is rotated so now it's your father,
+                # don't bother him or the belt shall come)
+                for c in current_input_node.children[:-1]:
+                    run(c, current_out_node)
+
+            rotate_tree(last_tail, parent)
+
+        run(tree.root, None)
+        return res
+
+    def parse(self, tokens: TokenStream) -> Optional[SyntaxTree]:
+        tree = SyntaxTree()
+
+        root = self.root
+        focus = root
+        focus_node = tree.add_node(focus, None)
+
+        node_stack = [(None, None)]  # Last element
+
+        token_iter = tokens
+
         current_token, current_text = token_iter.peek()
 
-    def consume_focus():
-        nonlocal focus, focus_node
-        focus, focus_node = node_stack.pop()
-
-    if current_token is None:
-        return None
-
-    while focus is not None:
-        # print(f"STEP {focus} {current_token}")
-
-        if current_token is 'space':
-            advance_token()
-            continue
-
-        if focus[0] == TERMINAL:
-            if current_token != focus[1]:
-                raise Exception(f'Error: expected {focus[1]} but found "{current_token}"')
-
-            focus_node.text = current_text
-            advance_token()
-            consume_focus()
+        def advance_token():
+            nonlocal current_token, current_text
+            token_iter.consume()
+            current_token, current_text = token_iter.peek()
 
             if current_token is None:
                 while focus is not None:
-                    if grammar.can_be_zero(focus):
+                    if self.can_be_zero(focus):
                         consume_focus()
                     else:
                         raise Exception(f'Token stream terminates too early, expected {focus}')
 
-        else:
-            children = grammar.next(focus[1], current_token)
-            if children is None:
-                raise Exception(f'Unexpected token {current_token}')
+        def consume_focus():
+            nonlocal focus, focus_node
+            focus, focus_node = node_stack.pop()
 
-            children_with_ids = [(x, tree.add_node(x, focus_node)) for x in children]
+        if current_token is None:
+            return None
 
-            node_stack += reversed(children_with_ids)
-            consume_focus()
-    return tree
+        while focus is not None:
+            # print(f"STEP {focus} {current_token}")
+
+            if current_token is 'space':
+                advance_token()
+                continue
+
+            if focus[0] == TERMINAL:
+                if current_token != focus[1]:
+                    raise Exception(f'Error: expected {focus[1]} but found "{current_token}"')
+
+                focus_node.text = current_text
+
+                consume_focus()
+                advance_token()
+
+            else:
+                children = self.next(focus[1], current_token)
+                if children is None:
+                    raise Exception(f'Unexpected token {current_token}')
+
+                children_with_ids = [(x, tree.add_node(x, focus_node)) for x in children]
+
+                node_stack += reversed(children_with_ids)
+                consume_focus()
+        return tree
 
 
 GRAMMAR_SCANNER = nfa.Regex.regex_map_to_nfa({
@@ -380,7 +433,10 @@ def main():
     print(grammar)
 
     token_stream = TokenStream(iter(input_scanner.tokenize('1+2*(3+4)')))
-    parse(grammar, token_stream).visualize()
+    gout = grammar.parse(token_stream)
+    gout.visualize()
+    gout2 = grammar.apply_transformation(gout)
+    gout2.visualize()
 
 
 
