@@ -5,6 +5,9 @@ import networkx as nx
 from . import fa, nfa
 
 
+TOKEN_ERROR_NOT_RECOGNIZED = '__error_no_token_match'
+
+
 class DeterministicFiniteAutomaton(fa.FiniteAutomaton):
     def __init__(self, data=None):
         self.graph = nx.MultiDiGraph(data)
@@ -154,7 +157,7 @@ class DeterministicFiniteAutomaton(fa.FiniteAutomaton):
                     #print('backtrack')
                 else:
                     # We can't backtrack, report error
-                    yield (None, text[token_start_index: index + 1])
+                    yield (TOKEN_ERROR_NOT_RECOGNIZED, text[token_start_index: index + 1])
                     # What is the back-on-track strategy? well I don't really know, none for now
                     token_start_index = index + 1
                     runner.reset()
@@ -171,7 +174,7 @@ class DeterministicFiniteAutomaton(fa.FiniteAutomaton):
 
         if token_start_index != len(text) and runner.token is None:
             # No token recognized for final string
-            yield (None, text[token_start_index:index])
+            yield (TOKEN_ERROR_NOT_RECOGNIZED, text[token_start_index:index])
         elif runner.token:
             yield (runner.token, text[token_start_index:index])
 
