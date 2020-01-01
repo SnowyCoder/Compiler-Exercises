@@ -23,10 +23,10 @@ GRM = {
 
 class SyntaxTreeNode:
     def __init__(self, parent, ntype, text):
-        self.parent = parent
+        self.parent = parent  # type: SyntaxTreeNode
         self.ntype = ntype
         self.text = text
-        self.children = []
+        self.children = []  # type: List[SyntaxTreeNode]
 
 
 class SyntaxTree:
@@ -43,7 +43,7 @@ class SyntaxTree:
         return node
 
     @property
-    def root(self):
+    def root(self) -> SyntaxTreeNode:
         return self.nodes[0]
 
     def visualize(self):

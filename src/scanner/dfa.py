@@ -206,7 +206,7 @@ class DFARunner:
     @property
     def token(self):
         if self.error: raise Exception("Cannot get token on error")
-        return self.graph.node[self.state]['token']
+        return self.graph.nodes[self.state]['token']
 
     def reset(self):
         self.state = self.start
